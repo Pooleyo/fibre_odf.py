@@ -3,20 +3,23 @@ import matplotlib.pyplot as plt
 import os
 import shutil
 
-wavelength = 1.378E-10
+wavelength = [1.398E-10, 1.367E-10]  # He-alpha emission has low= 1.398 A; high = 1.367 A
 a_lattice = 3.3E-10
 
 hkl_plane = [4, 1, 1]
 gaussian_width = 2.0/2.355  # Only applies to fibre texture.
-fibre_counter = 10000
+fibre_counter = 1000
 powder_counter = 1000000
-num_bins = 241  # DON'T CHANGE FROM 241; this is hardcoded elsewhere...
+num_bins = 961
+num_circles = 10
 
-fibre_texture = True
-powder_texture = True
+polefig_fibre_texture = True
+polefig_powder_texture = False
+fibre_profile = False
 
 alpha = 40.0
-twotheta = 2 * np.rad2deg(np.arcsin(0.5 * wavelength * np.linalg.norm(hkl_plane) / a_lattice))
+twotheta = [2 * np.rad2deg(np.arcsin(0.5 * wavelength[0] * np.linalg.norm(hkl_plane) / a_lattice)),
+            2 * np.rad2deg(np.arcsin(0.5 * wavelength[1] * np.linalg.norm(hkl_plane) / a_lattice))]
 
 diffraction_width_multipliers = [0.97, 1.0]
 
@@ -26,7 +29,6 @@ phi_limits = [-113.62725450901803, 114.34869739478961]  # In degrees. This limit
 show_polefig = False
 show_diffractionfig = False
 show_intersectionfig = False
-
 
 def MakeVectorFamily(hkl_plane):
 
@@ -347,7 +349,7 @@ def ReflectPolefig(polefig):
     return master_polefig
 
 
-def PlotQuiver(vectors):
+def PlotHedgehog(vectors):
 
     import numpy as np
     from mayavi import mlab
@@ -372,6 +374,8 @@ def SingleFibreTexture(h, k, l, counter, gaussian_width, polefig, polefig_bins):
 
     import numpy as np
 
+    all_G = np.zeros((counter, 3))
+
     for i in range(counter):
 
         a = np.array([1.0, 0.0, 0.0])
@@ -382,28 +386,29 @@ def SingleFibreTexture(h, k, l, counter, gaussian_width, polefig, polefig_bins):
 
         G = RotMatBunge(G, 0.0, np.random.uniform(0.0, 55.0), 45.0)
 
+        G_mag = np.linalg.norm(G)
+
         if G[2] > 0.0:  # TODO why? What happens if we remove the if statement? ANS: This selects for hemispheres in the
             # TODO hedgehog. One hemisphere will project inside the unit circle, the other will project outside.
-
 
             G = RotateXtal2(G, 0.0, 0.0, np.random.normal(scale=gaussian_width))
             G = RotateXtal2(G, 90.0, 0.0, np.random.normal(scale=gaussian_width))
             G = RotateXtal2(G, 90.0, 90.0, np.random.normal(scale=gaussian_width))
 
-            G_mag = np.linalg.norm(G)
-
             theta_pole = np.arccos(G[2]/G_mag)
             phi_pole = np.arctan2(G[1]/G_mag, G[0]/G_mag)
 
-            x_num = (np.tan(theta_pole*0.5))*np.cos(phi_pole) # TODO look into DimOffset
-            y_num = (np.tan(theta_pole*0.5))*np.sin(phi_pole) # TODO look into DimOffset
+            x_num = (np.tan(theta_pole*0.5))*np.cos(phi_pole)
+            y_num = (np.tan(theta_pole*0.5))*np.sin(phi_pole)
 
             x_bin = np.argmin(abs(polefig_bins - x_num))
             y_bin = np.argmin(abs(polefig_bins - y_num))
 
             polefig[x_bin, y_bin] += 1
 
-    return
+        all_G[i] = G/G_mag
+
+    return all_G
 
 
 def PowderTexture(counter, polefig, polefig_bins):
@@ -469,13 +474,25 @@ def PoleFigureXY(alpha, twotheta, phi):
     return x_polefig, y_polefig
 
 
-def CalcPhiDiffractionRing(circle, origin):
+def FindCircleFeatures(alpha, twotheta):
+
+    x0, y0 = PoleFigureXY(alpha, twotheta, 0.0)
+    x1, y1 = PoleFigureXY(alpha, twotheta, 180.0)
+
+    circle_origin = [(y0 + y1) * 0.5, (x0 + x1) * 0.5]  # y value goes first since numpy has format [row, col]
+
+    circle_radius = 0.5 * np.linalg.norm(np.array([y1 - y0, x1 - x0]))
+
+    return circle_origin, circle_radius
+
+
+def CalcPhiDiffractionRing(circle, origin, num_bins):
 
     import numpy as np
 
     x_ind, y_ind = np.nonzero(circle)
 
-    xx, yy = np.mgrid[-1.2:1.2:241j, -1.2:1.2:241j]
+    xx, yy = np.mgrid[-1.2:1.2:(num_bins * 1j), -1.2:1.2:(num_bins * 1j)]
 
     xx = xx[x_ind, y_ind]
     yy = yy[x_ind, y_ind]
@@ -529,23 +546,58 @@ def BinDiffractionRing(texture_profile, phi, num_bins):
     return integrated_texture_profile_across_phi, bins
 
 
-def MakeDiffractionRingArray(array_shape, origin, lower_width, upper_width):
+def MakeDiffractionAnnulusArray(array_shape, origin_high_energy, origin_low_energy, radius_high_energy,
+                                radius_low_energy, num_circles, twotheta):
 
     import numpy as np
 
-    xx, yy = np.mgrid[-1.2:1.2:241j, -1.2:1.2:241j]
+    def Circle(origin, lower_width, upper_width, plot_name):
 
-    r_sqr = (xx - origin[0]) ** 2 + (yy - origin[1]) ** 2
+        xx, yy = np.mgrid[-1.2:1.2:(num_bins * 1j), -1.2:1.2:(num_bins * 1j)]
 
-    circle = np.logical_and(r_sqr > lower_width**2, r_sqr < upper_width**2)
+        r_sqr = (xx - origin[0]) ** 2 + (yy - origin[1]) ** 2
 
-    plt.imsave(output_folder + '/1_dif_fig.tif', circle, origin='lower', cmap='viridis')
+        circle = np.logical_and(r_sqr > lower_width**2, r_sqr < upper_width**2)
+
+        plt.imsave(output_folder + '/' + plot_name, circle, origin='lower', cmap='viridis')
+        if show_diffractionfig is True:
+            plt.imshow(circle, origin="lower", cmap='viridis')
+            plt.show()
+        plt.close()
+
+        return circle
+
+    circle_high_energy = Circle(origin_high_energy, radius_high_energy, 1.02 * radius_high_energy,
+                                "1_circle_high_energy")
+
+    circle_low_energy = Circle(origin_low_energy, 0.98 * radius_low_energy, radius_low_energy, "2_circle_low_energy")
+
+    edge_circles = circle_low_energy + circle_high_energy
+
+    plt.imsave(output_folder + '/edge_circles', edge_circles, origin='lower', cmap='viridis')
+    plt.close()
+
+    all_circles = edge_circles.copy()
+
+    twotheta_scan_values = np.linspace(twotheta[0], twotheta[1], num_circles, endpoint=False)
+
+    dr = 0.02
+
+    for i, twotheta in enumerate(twotheta_scan_values):
+
+        o, r = FindCircleFeatures(alpha, twotheta)
+
+        circ = Circle(o, r, (1.0 + dr) * r, "circ_" + str(i))
+
+        all_circles += circ
+
+    plt.imsave(output_folder + '/all_circles', all_circles, origin='lower', cmap='viridis')
     if show_diffractionfig is True:
-        plt.imshow(circle, origin="lower", cmap='viridis')
+        plt.imshow(all_circles, origin="lower", cmap='viridis')
         plt.show()
     plt.close()
 
-    return circle
+    return all_circles
 
 
 def FindArrayIntersection(polefig_arr, dif_arr):
@@ -564,7 +616,7 @@ def FindArrayIntersection(polefig_arr, dif_arr):
 
         intersection_arr[row, col] = ring_value
 
-    plt.imsave(output_folder + '/2_intersection_fig.tif', intersection_arr, origin='lower', cmap='viridis')
+    plt.imsave(output_folder + '/4_intersection_fig.tif', intersection_arr, origin='lower', cmap='viridis')
     if show_intersectionfig is True:
         plt.imshow(intersection_arr, origin="lower", cmap='viridis')
         plt.show()
@@ -609,7 +661,7 @@ def CalcCorrectionFactor(fibre_intensity, powder_intensity, fibre_counter, powde
     return intensity_correction_factor
 
 
-def runFibre(hkl_plane, counter, alpha, twotheta, diffraction_width_mutipliers, num_phi_bins):
+def runPolefigFibre(hkl_plane, counter, alpha, twotheta, diffraction_width_mutipliers, num_phi_bins):
 
     # The following runs the SingleFibreTexture function for every accepted plane.
 
@@ -623,24 +675,19 @@ def runFibre(hkl_plane, counter, alpha, twotheta, diffraction_width_mutipliers, 
         h, k, l = plane
 
         SingleFibreTexture(h, k, l, counter, gaussian_width, polefig, polefig_bins)
-    # TODO Clean up this code
+
     master_polefig = ReflectPolefig(polefig)
 
-    x0, y0 = PoleFigureXY(alpha, twotheta, 0.0)
-    x1, y1 = PoleFigureXY(alpha, twotheta, 180.0)
+    origin_low_energy, radius_low_energy = FindCircleFeatures(alpha, twotheta[0])
 
-    circle_origin = [(y0 + y1) * 0.5, (x0 + x1) * 0.5]  # y value goes first since numpy has format [row, col]
+    origin_high_energy, radius_high_energy = FindCircleFeatures(alpha, twotheta[1])
 
-    circle_radius = 0.5 * np.linalg.norm(np.array([y1-y0, x1-x0]))
-
-    inner_radius = diffraction_width_multipliers[0] * circle_radius
-    outer_radius = diffraction_width_multipliers[1] * circle_radius
-
-    dif_array = MakeDiffractionRingArray(polefig.shape, circle_origin, inner_radius, outer_radius)
+    dif_array = MakeDiffractionAnnulusArray(polefig.shape, origin_high_energy, origin_low_energy, radius_high_energy,
+                                            radius_low_energy, num_circles, twotheta)
 
     texture_profile = FindArrayIntersection(master_polefig, dif_array)
 
-    phi = CalcPhiDiffractionRing(dif_array, circle_origin)
+    phi = CalcPhiDiffractionRing(dif_array, origin_low_energy, num_bins)
 
     integrated_texture_profile, bins = BinDiffractionRing(texture_profile, phi, num_phi_bins)
 
@@ -649,7 +696,7 @@ def runFibre(hkl_plane, counter, alpha, twotheta, diffraction_width_mutipliers, 
     return fibre_intensity
 
 
-def runPowder(counter, alpha, twotheta, diffraction_width_multipliers):
+def runPolefigPowder(counter, alpha, twotheta, diffraction_width_multipliers):
 
     polefig = np.zeros((num_bins, num_bins))
     polefig_bins = np.linspace(-1.2, 1.2, num_bins, endpoint=True)
@@ -668,7 +715,7 @@ def runPowder(counter, alpha, twotheta, diffraction_width_multipliers):
     inner_radius = diffraction_width_multipliers[0] * circle_radius
     outer_radius = diffraction_width_multipliers[1] * circle_radius
 
-    dif_array = MakeDiffractionRingArray(polefig.shape, circle_origin, inner_radius, outer_radius)
+    dif_array = MakeDiffractionAnnulusArray(polefig.shape, circle_origin, inner_radius, outer_radius)
 
     texture_profile = FindArrayIntersection(master_polefig, dif_array)
 
@@ -681,9 +728,48 @@ def runPowder(counter, alpha, twotheta, diffraction_width_multipliers):
     return powder_intensity
 
 
-if fibre_texture is True:
+def runProfileFibre(hkl_plane, counter, alpha, twotheta, diffraction_width_mutipliers, num_phi_bins):
 
-    output_folder = 'output_fibre_' + str(hkl_plane[0]) + str(hkl_plane[1]) + str(hkl_plane[2])
+    # The following runs the SingleFibreTexture function for every accepted plane.
+
+    polefig = np.zeros((num_bins, num_bins))
+    polefig_bins = np.linspace(-1.2, 1.2, num_bins, endpoint=True)
+
+    vector_family = MakeVectorFamily(hkl_plane)
+
+    for plane in vector_family:
+
+        h, k, l = plane
+
+        all_G = SingleFibreTexture(h, k, l, counter, gaussian_width, polefig, polefig_bins)
+
+    PlotHedgehog(all_G)
+
+    """
+    master_polefig = ReflectPolefig(polefig)
+
+    origin_low_energy, radius_low_energy = FindCircleFeatures(alpha, twotheta[0])
+
+    origin_high_energy, radius_high_energy = FindCircleFeatures(alpha, twotheta[1])
+
+
+    dif_array = MakeDiffractionRingArray(polefig.shape, origin_high_energy, origin_low_energy, radius_high_energy,
+                                         radius_high_energy)
+    exit()
+    texture_profile = FindArrayIntersection(master_polefig, dif_array)
+
+    phi = CalcPhiDiffractionRing(dif_array, circle_origin)
+
+    integrated_texture_profile, bins = BinDiffractionRing(texture_profile, phi, num_phi_bins)
+
+    fibre_intensity = CalcIntegratedIntensity(integrated_texture_profile, bins, phi_limits)
+    """
+    return
+
+
+if polefig_fibre_texture is True:
+
+    output_folder = 'output_polefig_fibre_' + str(hkl_plane[0]) + str(hkl_plane[1]) + str(hkl_plane[2])
 
     if os.path.exists(output_folder):
 
@@ -691,11 +777,11 @@ if fibre_texture is True:
 
     os.mkdir(output_folder)
 
-    fibre_intensity = runFibre(hkl_plane, fibre_counter, alpha, twotheta, diffraction_width_multipliers, num_phi_bins)
+    fibre_intensity = runPolefigFibre(hkl_plane, fibre_counter, alpha, twotheta, diffraction_width_multipliers, num_phi_bins)
 
-if powder_texture is True:
+if polefig_powder_texture is True:
 
-    output_folder = 'output_powder_' + str(hkl_plane[0]) + str(hkl_plane[1]) + str(hkl_plane[2])
+    output_folder = 'output_polefig_powder_' + str(hkl_plane[0]) + str(hkl_plane[1]) + str(hkl_plane[2])
 
     if os.path.exists(output_folder):
 
@@ -703,8 +789,20 @@ if powder_texture is True:
 
     os.mkdir(output_folder)
 
-    powder_intensity = runPowder(powder_counter, alpha, twotheta, diffraction_width_multipliers)
+    powder_intensity = runPolefigPowder(powder_counter, alpha, twotheta, diffraction_width_multipliers)
 
-if powder_texture and fibre_texture is True:
+if polefig_powder_texture and polefig_fibre_texture is True:
 
     correction_factor = CalcCorrectionFactor(fibre_intensity, powder_intensity, fibre_counter, powder_counter)
+
+if fibre_profile is True:
+
+    output_folder = 'output_profile_fibre_' + str(hkl_plane[0]) + str(hkl_plane[1]) + str(hkl_plane[2])
+
+    if os.path.exists(output_folder):
+
+        shutil.rmtree(output_folder)
+
+    os.mkdir(output_folder)
+
+    fibre_intensity = runProfileFibre(hkl_plane, fibre_counter, alpha, twotheta, diffraction_width_multipliers, num_phi_bins)
